@@ -35,114 +35,127 @@ export const parsePage = async (
 		lite: boolean;
 	},
 ) => {
-	// click clear button
+	const textareaSelector = "textarea[aria-label='Source text']";
+	const visibleLanguages = await page.evaluate(
+		(fromCode, toCode) => {
+			const visibleTablists = Array.from(
+				document.querySelectorAll<HTMLElement>('[role="tablist"]'),
+			).filter((tablist) =>
+				tablist.querySelectorAll("button[data-language-code]").length > 0
+			);
+			const sourceTablist = visibleTablists[0];
+			const targetTablist = visibleTablists[1];
+
+			return {
+				hasSource: Boolean(
+					sourceTablist?.querySelector(
+						`button[data-language-code="${fromCode}"]`,
+					),
+				),
+				hasTarget: Boolean(
+					targetTablist?.querySelector(
+						`button[data-language-code="${toCode}"]`,
+					),
+				),
+			};
+		},
+		from,
+		to,
+	);
+
+	if (!visibleLanguages.hasSource || !visibleLanguages.hasTarget) {
+		const params = new URLSearchParams({
+			sl: from,
+			tl: to,
+			op: "translate",
+		});
+		await page.goto(
+			`https://translate.google.com/details?${params.toString()}`,
+			{
+				waitUntil: "networkidle2",
+			},
+		);
+	}
+
+	// click clear button when available so we start from a clean source field
 	await page.$eval(
 		"button[aria-label='Clear source text']",
 		(btn) => (btn as HTMLButtonElement).click(),
-	);
+	).catch(() => {});
 
 	// switch source and target language
 	await page.evaluate(
-		(fromSelector, toSelector) => {
-			const fromLangs = Array.from(
-				document.querySelectorAll<HTMLElement>(fromSelector),
+		(fromCode, toCode) => {
+			const visibleTablists = Array.from(
+				document.querySelectorAll<HTMLElement>('[role="tablist"]'),
+			).filter((tablist) =>
+				tablist.querySelectorAll("button[data-language-code]").length > 0
 			);
-			if (fromLangs.length === 0) {
-				throw new Error(`No from language found, ${fromSelector}`);
-			}
-
-			const toLangs = Array.from(
-				document.querySelectorAll<HTMLElement>(toSelector),
+			const sourceTablist = visibleTablists[0];
+			const targetTablist = visibleTablists[1];
+			const sourceButton = sourceTablist?.querySelector<HTMLElement>(
+				`button[data-language-code="${fromCode}"]`,
 			);
-			if (toLangs.length === 0) {
-				throw new Error(`No to language found, ${toSelector}`);
+			const targetButton = targetTablist?.querySelector<HTMLElement>(
+				`button[data-language-code="${toCode}"]`,
+			);
+
+			if (
+				sourceButton && sourceButton.getAttribute("aria-selected") !== "true"
+			) {
+				sourceButton.click();
 			}
-
-			const isInRecentScope = (el: HTMLElement) =>
-				(el.parentElement?.firstChild as HTMLElement)?.innerText ===
-					"Recent languages";
-
-			// (all)?   (all)?   ?   ?
-			// from
-			// (all)?   (all)?   ?   ?
-			//          to
-			let from = fromLangs[0]!;
-			let to = toLangs[0]!;
-
-			// check from
-			if (isInRecentScope(from)) {
-				// recent all
-				//        from
-				from = fromLangs[1]!;
-			}
-
-			// check to
-			if (isInRecentScope(to)) {
-				// recent all  ?   ?
-				//             to
-				to = toLangs[2]!;
-				if (isInRecentScope(to)) {
-					// recent all recent all
-					//                   to
-					to = toLangs[3]!;
-				}
-			} else {
-				// all ?   ?   ?
-				//     to
-				to = toLangs[1]!;
-				if (isInRecentScope(to)) {
-					// all recent all \
-					//            to
-					to = toLangs[2]!;
-				}
-			}
-
-			if (from.getAttribute("aria-selected") !== "true") {
-				from.click();
-			}
-			if (to.getAttribute("aria-selected") !== "true") {
-				to.click();
+			if (
+				targetButton && targetButton.getAttribute("aria-selected") !== "true"
+			) {
+				targetButton.click();
 			}
 		},
-		from === "auto"
-			? `button[data-language-code='auto']`
-			: `div[data-language-code='${from}']`,
-		`div[data-language-code='${to}']`,
+		from,
+		to,
 	);
 
-	// type text
-	const textareaSelector = "textarea[aria-label='Source text']";
-	await page.$eval(
-		textareaSelector,
-		(
-			textarea,
-			text,
-		) => ((textarea as HTMLTextAreaElement).value = text as string),
-		text,
-	);
-	await page.type(textareaSelector, " ");
+	// type text like a real user so Google Translate reacts on reused pages
+	await page.click(textareaSelector, { clickCount: 3 });
+	await page.keyboard.press("Backspace");
+	await page.type(textareaSelector, text);
 
 	// translating...
 	let result = "";
 	let pronunciation = "";
 	do {
-		// const targetSelector = `span[data-language-for-alternatives=${to}]`;
-		const targetSelector = `span[lang=${to}]`;
-		const targetTextSelector = `span[lang=${to}] > span > span`;
-		await page.waitForSelector(targetSelector);
+		const targetTextareaSelector = `textarea[lang="${to}"]`;
+		await page.waitForFunction(
+			(targetTextareaSelector) => {
+				const targetTextarea = document.querySelector(targetTextareaSelector);
+				return targetTextarea instanceof HTMLTextAreaElement &&
+					targetTextarea.value.trim() !== "";
+			},
+			{},
+			targetTextareaSelector,
+		);
 
 		// get translated text
 		result += await page.evaluate(
-			(targetSelector, targetTextSelector) =>
-				Array.from(
-					document
-						.querySelector<HTMLElement>(targetSelector)!
-						.querySelectorAll<HTMLElement>(targetTextSelector)!,
+			(targetTextareaSelector, to) => {
+				const targetTextarea = document.querySelector(targetTextareaSelector);
+				if (
+					targetTextarea instanceof HTMLTextAreaElement &&
+					targetTextarea.value.trim() !== ""
+				) {
+					return targetTextarea.value.replace(/[\u200B-\u200D\uFEFF]/g, "");
+				}
+
+				return Array.from(
+					document.querySelectorAll<HTMLElement>(
+						`span.HwtZe[lang="${to}"] .ryNqvb`,
+					),
 				)
-					.map((s) => s.innerText!.replace(/[\u200B-\u200D\uFEFF]/g, ""))
-					.join(""), // remove zero-width space
-			targetSelector,
-			targetTextSelector,
+					.map((s) => s.innerText.replace(/[\u200B-\u200D\uFEFF]/g, ""))
+					.join("");
+			},
+			targetTextareaSelector,
+			to,
 		);
 
 		// get pronunciation
@@ -202,236 +215,244 @@ export const parsePage = async (
 	//     name: e.innerText.trim(),
 	// })).filter(e => e.code && !e.code.includes("history"))
 
-	// get did you mean
-	const fromDidYouMean = await page.evaluate(() => {
-		const didYouMeanBlock = document.querySelector<HTMLElement>("html-blob");
-		const hasDidYouMean = ["Did you mean:", "Showing translation for"].some(
-			(t) =>
-				didYouMeanBlock?.parentElement?.parentElement?.innerHTML.includes(t),
-		);
+	if (!lite) {
+		await page
+			.waitForFunction(() => {
+				const details = document.querySelector("c-wiz[role='complementary']");
+				return Boolean(
+					details?.textContent?.includes("No details found for") ||
+						details?.textContent?.includes("Enter text to look up details") ||
+						document.querySelector("h3.FpSDVb"),
+				);
+			}, { timeout: 5000 })
+			.catch(() => {});
+	}
 
-		return hasDidYouMean ? didYouMeanBlock?.innerText : undefined;
-	});
-
-	// get suggestions
-	const fromSuggestions = lite || from === "auto" // auto lang doesn't have suggestions
-		? undefined
-		: await page.evaluate(() => {
-			const sgsBlocks = Array.from(
-				document.querySelectorAll<HTMLElement>('ul[role="listbox"] > li'),
-			);
-			return sgsBlocks.length === 0 ? undefined : sgsBlocks.map((b) => {
-				return {
-					text: b.children[0].textContent!.replace(
-						/[\u200B-\u200D\uFEFF]/g,
-						"",
-					),
-					translation: b.children[1].textContent!.replace(
-						/[\u200B-\u200D\uFEFF]/g,
-						"",
-					),
-				};
-			});
-		});
-
-	// get from pronunciation
-	const fromPronunciation = (await page.evaluate(() =>
-		document
-			.querySelector<HTMLElement>('div[data-location="1"] > div')
-			?.innerText?.replace(/[\u200B-\u200D\uFEFF]/g, "")
-	)) || undefined;
-
-	const noDetails = await page.evaluate(() => {
-		return document
-			.querySelector<HTMLDivElement>("c-wiz[role='complementary'] > div > div")
-			?.innerText?.startsWith("No details found for");
-	});
-
-	// get examples
-	await page.waitForSelector("html-blob", { timeout: 100 }).catch(() => {});
-
-	// get definitions
-	const definitions = lite || noDetails
-		? undefined
-		: await page.evaluate(() => {
-			const ret: IDefinitions = {};
-
-			if (
-				!document
-					.querySelector<HTMLElement>(
-						"c-wiz[role='complementary'] > div > c-wiz > div > div:nth-child(3) > div > div > div",
+	const {
+		fromDidYouMean,
+		fromSuggestions,
+		fromPronunciation,
+		examples,
+		definitions,
+		translations,
+	} = await page.evaluate(
+		(from, to, lite, isAuto) => {
+			const clean = (value?: string | null) =>
+				value
+					?.replace(/[\u200B-\u200D\uFEFF]/g, "")
+					.replace(/\s+/g, " ")
+					.trim();
+			const normalizePronunciation = (value?: string | null) => {
+				const normalized = clean(value);
+				if (
+					!normalized ||
+					["Listen", "Loading", "Show more", "Show less"].some((token) =>
+						normalized.includes(token)
 					)
-					?.innerText.includes("Definitions of")
-			) {
-				return ret;
-			}
+				) {
+					return undefined;
+				}
+				return normalized;
+			};
+			const headings = Array.from(
+				document.querySelectorAll<HTMLElement>("h3.FpSDVb"),
+			);
+			const getSectionByTitle = (title: string) =>
+				headings.find((heading) => heading.innerText.startsWith(title))
+					?.parentElement;
+			const resolvedFrom = (isAuto
+				? document
+					.querySelector<HTMLElement>('div[data-location="5"]')
+					?.getAttribute("data-language-code") ??
+					document
+						.querySelector<HTMLElement>(".vvvYne[lang]")
+						?.getAttribute("lang")
+				: from) ?? from;
 
-			const definitionalBlocks = Array.from(
-				document.querySelectorAll<HTMLElement>(
-					"c-wiz[role='complementary'] > div > c-wiz > div > div:nth-child(3) > div > div > div > div",
-				),
+			const didYouMeanBlock = Array.from(
+				document.querySelectorAll<HTMLElement>("html-blob"),
+			).find((block) =>
+				["Did you mean:", "Showing translation for"].some((text) =>
+					block.parentElement?.parentElement?.innerHTML.includes(text)
+				)
 			);
 
-			let blockClassName = undefined;
-			for (
-				let i = 0,
-					currentPos = "unknown",
-					currentLabels: string[] | undefined;
-				i < definitionalBlocks.length;
-				++i
-			) {
-				const isHiddenBlock =
-					definitionalBlocks[i].getAttribute("role") === "presentation";
-				const block = isHiddenBlock
-					? definitionalBlocks[i].children[0]
-					: definitionalBlocks[i];
+			const rawSuggestions = lite || isAuto ? undefined : Array.from(
+				document.querySelectorAll<HTMLElement>('ul[role="listbox"] > li'),
+			)
+				.map((suggestion) => {
+					const text = clean(
+						suggestion.querySelector<HTMLElement>(`[lang="${from}"]`)
+							?.innerText,
+					);
+					const translation = clean(
+						suggestion.querySelector<HTMLElement>(`[lang="${to}"]`)
+							?.innerText,
+					);
 
-				const isButtonBlock = block.children[0].tagName === "BUTTON"; // Show all button
-				if (isButtonBlock) {
-					continue;
-				}
+					return text ? { text, translation: translation ?? "" } : undefined;
+				})
+				.filter((suggestion) => suggestion !== undefined);
+			const fromSuggestions = rawSuggestions && rawSuggestions.length > 0
+				? rawSuggestions
+				: undefined;
 
-				const isPosBlock = block.children[0].childElementCount === 0; // a text block
-				if (isPosBlock) {
-					currentPos = block.children[0].textContent!.toLowerCase();
-					if (currentPos.includes("expand")) {
-						continue;
-					}
-					ret[currentPos] = [];
-					currentLabels = undefined; // reset labels
-				} else {
-					// parse definition block
-					const def: IDefinitions[string][number] = { definition: "" };
-					if (!blockClassName) {
-						blockClassName = block.className;
-					} else if (block.className !== blockClassName) {
-						continue;
-					}
-					const leftBlock = block.children[0]; // its children should be number or nothing
-					const rightBlock = block.children[1]; // its children should be the definition div or label div
-					const isRightBlockLabel = leftBlock.childElementCount === 0;
-					if (isRightBlockLabel) {
-						currentLabels = [rightBlock.textContent!.toLowerCase()]; // this label should be the following blocks' labels
-						continue;
-					} else {
-						// definition block
+			const fromPronunciation = normalizePronunciation(
+				document.querySelector<HTMLElement>('div[data-location="1"]')
+					?.innerText,
+			);
 
-						// check the previous labels first
-						if (currentLabels) {
-							def.labels = currentLabels;
+			const detailsRoot = document.querySelector("c-wiz[role='complementary']");
+			const noDetails =
+				detailsRoot?.textContent?.includes("No details found for") ||
+				detailsRoot?.textContent?.includes("Enter text to look up details");
+			if (lite || noDetails) {
+				return {
+					fromDidYouMean: clean(didYouMeanBlock?.innerText),
+					fromSuggestions,
+					fromPronunciation,
+					examples: undefined,
+					definitions: undefined,
+					translations: undefined,
+				};
+			}
+
+			const definitionsSection = getSectionByTitle("Definitions of");
+			const definitions: IDefinitions = {};
+			if (definitionsSection) {
+				let currentPartOfSpeech: string | undefined;
+				for (
+					const rawChild of Array.from(definitionsSection.children).slice(1)
+				) {
+					const child = rawChild.getAttribute("role") === "presentation" &&
+							rawChild.firstElementChild instanceof HTMLElement
+						? rawChild.firstElementChild
+						: rawChild;
+
+					if (child.matches(".pRq29d")) {
+						currentPartOfSpeech = clean(child.textContent)?.toLowerCase();
+						if (currentPartOfSpeech) {
+							definitions[currentPartOfSpeech] = [];
 						}
+						continue;
+					}
 
-						const blocks = Array.from(rightBlock.children);
+					if (!currentPartOfSpeech || !child.matches(".AVg9bf")) {
+						continue;
+					}
 
-						// the leading block could be (local) labels
-						const hasLabels = blocks[0].childElementCount >= 1;
-						if (hasLabels) {
-							def.labels = Array.from(blocks[0].children).map(
-								(b) => b.textContent!,
+					const definitionBlock = child.querySelector<HTMLElement>(".ILf88");
+					const definition = clean(
+						definitionBlock
+							?.querySelector<HTMLElement>(`div[lang="${resolvedFrom}"]`)
+							?.textContent,
+					);
+					if (!definition) {
+						continue;
+					}
+
+					const example = clean(definitionBlock?.querySelector("q")?.innerText);
+					const labels = Array.from(
+						definitionBlock?.querySelectorAll<HTMLElement>(
+							".ILf88 > .nMdasd",
+						) ??
+							[],
+					)
+						.map((label) => clean(label.innerText))
+						.filter((label): label is string => Boolean(label));
+					const synonyms = Array.from(
+						definitionBlock?.querySelectorAll<HTMLElement>(
+							`ul.PwrFgb span[lang="${resolvedFrom}"]`,
+						) ?? [],
+					)
+						.map((synonym) => clean(synonym.innerText))
+						.filter((synonym): synonym is string => Boolean(synonym));
+
+					definitions[currentPartOfSpeech].push({
+						definition,
+						...(example && { example }),
+						...(labels.length > 0 && { labels }),
+						...(synonyms.length > 0 && {
+							synonyms: {
+								common: synonyms,
+							},
+						}),
+					});
+				}
+			}
+
+			const examplesSection = getSectionByTitle("Examples of");
+			const examples = examplesSection
+				? Array.from(examplesSection.querySelectorAll<HTMLElement>(".lc69I"))
+					.map((example) => clean(example.innerText))
+					.filter((example): example is string => Boolean(example))
+				: undefined;
+
+			const translationsSection = getSectionByTitle("Translations of");
+			const translations: ITranslations = {};
+			if (translationsSection) {
+				for (
+					const tbody of Array.from(
+						translationsSection.querySelectorAll<HTMLElement>("table tbody"),
+					)
+				) {
+					const rows = Array.from(tbody.querySelectorAll("tr"));
+					const partOfSpeech = clean(
+						rows[0]
+							?.querySelector<HTMLElement>('th[scope="rowgroup"] .WiGTJe')
+							?.innerText,
+					)?.toLowerCase();
+					if (!partOfSpeech) {
+						continue;
+					}
+
+					translations[partOfSpeech] = rows
+						.map((row) => {
+							const translation = clean(
+								row.querySelector<HTMLElement>(`th[scope="row"] [lang="${to}"]`)
+									?.innerText,
 							);
-							blocks.shift();
-						}
-
-						// there must be a definition
-						def.definition = blocks[0].textContent!;
-						blocks.shift();
-
-						// there may be some blocks after the definition
-
-						// there may be an example
-						try {
-							const hasExample = blocks.length > 0 &&
-								blocks[0].children[0]?.tagName === "Q";
-							if (hasExample) {
-								def.example = blocks[0].children[0].textContent!;
-								blocks.shift();
+							if (!translation) {
+								return undefined;
 							}
-						} catch (e) {
-							if (e instanceof Error) {
-								throw new Error(
-									`Failed parsing definition's example: ${e.message}. ` +
-										JSON.stringify(def),
-								);
-							}
-							throw e;
-						}
 
-						// there may be synonyms
-						const hasSynonyms = blocks.length > 0 &&
-							blocks[0].textContent === "Synonyms:";
-						if (hasSynonyms) {
-							blocks.shift();
-							def.synonyms = {};
-							while (blocks.length > 0) {
-								const words = Array.from(blocks[0].children);
-								const hasType = words[0].textContent!.includes(":");
-								const type = hasType
-									? words[0].textContent!.split(":")[0]
-									: "common";
-								if (hasType) {
-									words.shift();
-								}
-								def.synonyms[type] = words.map((w) => w.textContent!.trim());
-								blocks.shift();
-							}
-						}
-
-						ret[currentPos].push(def);
-
-						// definition block end
-					}
+							return {
+								translation,
+								reversedTranslations: Array.from(
+									row.querySelectorAll<HTMLElement>(
+										`td ul [lang="${resolvedFrom}"]`,
+									),
+								)
+									.map((item) => clean(item.innerText))
+									.filter((item): item is string => Boolean(item)),
+								frequency: clean(
+									row.querySelector<HTMLElement>('[role="img"]')
+										?.getAttribute("aria-label"),
+								)?.toLowerCase() ?? "",
+							};
+						})
+						.filter((item) => item !== undefined);
 				}
 			}
 
-			return ret;
-		});
-
-	const examples = lite || noDetails
-		? undefined
-		: await page.evaluate((from) => {
-			const egBlocks = Array.from(
-				document.querySelectorAll(
-					`c-wiz[role='complementary'] > div > c-wiz > div > div > div > div:nth-child(2) > div > div div[lang=${from}]`,
-				),
-			);
-			return egBlocks.map((el) => el.textContent!) as IExamples;
-		}, from);
-
-	const translations = lite || noDetails
-		? undefined
-		: await page.evaluate(() => {
-			const ret: ITranslations = {};
-			Array.from(
-				document.querySelectorAll<HTMLElement>("table > tbody"),
-			).forEach((tbody) => {
-				const [tr0, ...trs] = Array.from(tbody.children);
-				const [th0, ...tds] = Array.from(tr0.children);
-				const PoS = th0.textContent!.toLowerCase();
-				if (PoS === "") return;
-				trs.push({ children: tds } as unknown as Element);
-				ret[PoS] = trs.map(({ children }) => {
-					const [trans, reverseTranses, freq] = Array.from(children);
-					return {
-						translation: trans.textContent?.trim()!,
-						reversedTranslations: Array.from(
-							reverseTranses.children[0].children,
-						)
-							.map((c) => c.textContent!.replace(", ", "").split(", "))
-							.flat(),
-						frequency:
-							freq.firstElementChild?.firstElementChild?.firstElementChild
-								?.firstElementChild
-								?.getAttribute("aria-label")
-								?.toLowerCase() ??
-								freq.firstElementChild?.firstElementChild?.firstElementChild
-									?.firstElementChild?.firstElementChild
-									?.getAttribute("aria-label")
-									?.toLowerCase()!,
-					};
-				});
-			});
-			return ret;
-		});
+			return {
+				fromDidYouMean: clean(didYouMeanBlock?.innerText),
+				fromSuggestions,
+				fromPronunciation,
+				examples,
+				definitions: Object.keys(definitions).length > 0
+					? definitions
+					: undefined,
+				translations: Object.keys(translations).length > 0
+					? translations
+					: undefined,
+			};
+		},
+		from,
+		to,
+		lite,
+		from === "auto",
+	);
 
 	return {
 		result,
