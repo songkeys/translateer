@@ -124,7 +124,7 @@ const toAudioDataUrl = (base64: string) =>
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const findVisibleButton = async (
+const findVisibleButtonIndex = async (
 	page: Page,
 	selector: string,
 	timeout = 5000,
@@ -132,19 +132,58 @@ const findVisibleButton = async (
 	const deadline = Date.now() + timeout;
 
 	while (Date.now() < deadline) {
-		const buttons = await page.$$(selector);
+		const index = await page.evaluate((selector) => {
+			const buttons = Array.from(
+				document.querySelectorAll<HTMLElement>(selector),
+			);
 
-		for (const button of buttons) {
-			const box = await button.boundingBox();
-			if (box && box.width > 0 && box.height > 0) {
-				return button;
-			}
+			return buttons.findIndex((button) => {
+				const style = getComputedStyle(button);
+				const rect = button.getBoundingClientRect();
+				return rect.width > 0 &&
+					rect.height > 0 &&
+					style.display !== "none" &&
+					style.visibility !== "hidden" &&
+					!button.hasAttribute("disabled") &&
+					button.getAttribute("aria-hidden") !== "true";
+			});
+		}, selector).catch(() => -1);
+
+		if (index >= 0) {
+			return index;
 		}
 
 		await new Promise((resolve) => setTimeout(resolve, 100));
 	}
 
 	return undefined;
+};
+
+const clickVisibleButton = async (
+	page: Page,
+	selector: string,
+	timeout = 5000,
+) => {
+	const index = await findVisibleButtonIndex(page, selector, timeout);
+	if (index === undefined) {
+		return false;
+	}
+
+	return await page.evaluate(
+		(selector, index) => {
+			const button = Array.from(
+				document.querySelectorAll<HTMLElement>(selector),
+			)[index];
+			if (!button) {
+				return false;
+			}
+
+			button.click();
+			return true;
+		},
+		selector,
+		index,
+	).catch(() => false);
 };
 
 const extractAudioRequestKeyFromPostData = (postData?: string | null) => {
@@ -195,7 +234,8 @@ const captureAudioDataUrls = async (
 		await Promise.all(
 			jobs.map(async (job) => ({
 				...job,
-				hasButton: Boolean(await findVisibleButton(page, job.selector)),
+				hasButton: (await findVisibleButtonIndex(page, job.selector)) !==
+					undefined,
 			})),
 		)
 	).filter(
@@ -245,17 +285,15 @@ const captureAudioDataUrls = async (
 		// Capture each outgoing audio request as soon as it is dispatched, then let
 		// the corresponding responses resolve in parallel on the shared page.
 		for (const job of visibleJobs) {
-			const button = await findVisibleButton(page, job.selector);
-			if (!button) {
-				roleRequests.push({ role: job.role });
-				continue;
-			}
-
 			const requestPromise = page.waitForRequest((request) => {
 				return isAudioRpcRequest(request.url());
 			}, { timeout: 5000 }).catch(() => undefined);
 
-			await button.click();
+			const clicked = await clickVisibleButton(page, job.selector);
+			if (!clicked) {
+				roleRequests.push({ role: job.role });
+				continue;
+			}
 
 			const request = await requestPromise;
 			roleRequests.push({
