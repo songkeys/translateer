@@ -80,6 +80,7 @@ type TranslationResult = {
 	detectedLanguage?: string;
 	didYouMean?: string;
 	sourcePronunciation?: string;
+	targetPronunciation?: string;
 };
 
 type CardResult = {
@@ -301,6 +302,9 @@ const parseViaGoogleRpc = async (
 			dictionary: toDictionaryPayload(sourceCards, audioData?.fromDictionary),
 		});
 		const toSide = compactObject<ISide>({
+			...(translation.targetPronunciation && {
+				pronunciation: translation.targetPronunciation,
+			}),
 			...(audioData?.to && { audio: audioData.to }),
 			dictionary: toDictionaryPayload(targetCards, audioData?.toDictionary),
 		});
@@ -696,6 +700,9 @@ const parseTranslationPayload = (
 	const sourcePronunciation = cleanText(
 		asString(payload[0]?.[0]) ?? asString(payload[3]?.[6]),
 	);
+	const targetPronunciation = cleanText(
+		asString(payload[1]?.[0]?.[0]?.[1]),
+	);
 	const didYouMean = correctedText &&
 			correctedText.toLowerCase() !== cleanText(sourceText)?.toLowerCase()
 		? correctedText
@@ -707,6 +714,7 @@ const parseTranslationPayload = (
 		...(detectedLanguage && { detectedLanguage }),
 		...(didYouMean && { didYouMean }),
 		...(sourcePronunciation && { sourcePronunciation }),
+		...(targetPronunciation && { targetPronunciation }),
 	};
 };
 

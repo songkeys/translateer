@@ -108,6 +108,7 @@ target side (`to`):
     }
   },
   "to": {
+    "pronunciation": "Kon'nichiwa",
     "audio": "data:audio/mpeg;base64,...",
     "dictionary": {
       "headword": "dog",
