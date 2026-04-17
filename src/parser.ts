@@ -13,10 +13,31 @@ import {
 
 type IExamples = string[];
 
+type IDictionary = {
+	headword?: string;
+	pronunciation?: string;
+	audio?: string;
+	examples?: IExamples;
+	definitions?: IDefinitions;
+	synonyms?: ISynonyms;
+	related?: IRelated;
+	translations?: ITranslations;
+};
+
+type ISide = {
+	detectedLanguage?: string;
+	didYouMean?: string;
+	suggestions?: IFromSuggestions;
+	pronunciation?: string;
+	audio?: string;
+	dictionary?: IDictionary;
+};
+
 type IAudio = {
-	source?: string;
-	translation?: string;
-	dictionary?: string;
+	from?: string;
+	fromDictionary?: string;
+	to?: string;
+	toDictionary?: string;
 };
 
 type IFromSuggestions = {
@@ -43,6 +64,16 @@ type ITranslations = Record<
 	}[]
 >;
 
+type ISynonyms = Record<
+	string,
+	{
+		labels?: string[];
+		words: string[];
+	}[]
+>;
+
+type IRelated = string[];
+
 type TranslationResult = {
 	result: string;
 	resolvedFrom: string;
@@ -56,6 +87,8 @@ type CardResult = {
 	pronunciation?: string;
 	examples?: IExamples;
 	definitions?: IDefinitions;
+	synonyms?: ISynonyms;
+	related?: IRelated;
 	translations?: ITranslations;
 };
 
@@ -64,11 +97,21 @@ const PART_OF_SPEECH_LABELS: Record<number, string> = {
 	2: "verb",
 	3: "adjective",
 	4: "adverb",
-	5: "pronoun",
-	6: "preposition",
+	5: "preposition",
+	6: "abbreviation",
 	7: "conjunction",
-	8: "interjection",
-	9: "phrase",
+	8: "pronoun",
+	9: "interjection",
+	10: "phrase",
+	11: "prefix",
+	12: "suffix",
+	13: "article",
+	14: "combining_form",
+	15: "numeral",
+	16: "auxiliary_verb",
+	17: "exclamation",
+	18: "plural",
+	19: "particle",
 };
 
 const FREQUENCY_LABELS: Record<number, string> = {
@@ -76,6 +119,9 @@ const FREQUENCY_LABELS: Record<number, string> = {
 	2: "uncommon",
 	3: "rare",
 };
+
+const SAFE_RPC_CHUNK_LIMIT = 800;
+const CHUNK_SPLIT_MIN_RATIO = 0.6;
 
 export const parsePage = async (
 	page: Page,
@@ -92,12 +138,67 @@ export const parsePage = async (
 	},
 ) => {
 	await ensureGoogleRpcTemplates(page);
+	if (text.length > SAFE_RPC_CHUNK_LIMIT) {
+		return await parseLongTextViaGoogleRpc(page, {
+			text,
+			from,
+			to,
+			audio,
+		});
+	}
+
 	return await parseViaGoogleRpc(page, {
 		text,
 		from,
 		to,
 		audio,
 	}, true);
+};
+
+const translateViaGoogleRpc = async (
+	page: Page,
+	options: {
+		text: string;
+		from: string;
+		to: string;
+	},
+	allowReinitialize: boolean,
+) => {
+	const templates = getGoogleRpcTemplates();
+
+	try {
+		const translationRequest = buildTranslationRequest(
+			templates,
+			options.text,
+			options.from,
+			options.to,
+		);
+		const translationResponses = await executeGoogleRpc(page, [
+			translationRequest,
+		]);
+		const translationPayload = extractRpcPayload(
+			translationResponses.translate.body,
+			templates.ids.translate,
+		);
+
+		return parseTranslationPayload(
+			translationPayload,
+			options.text,
+			options.from,
+		);
+	} catch (error) {
+		if (!allowReinitialize) {
+			throw error;
+		}
+
+		await browserSession.withIsolatedPage(async (isolatedPage) => {
+			await ensureGoogleRpcTemplates(isolatedPage, {
+				force: true,
+				validate: true,
+			});
+		});
+		return await translateViaGoogleRpc(page, options, false);
+	}
 };
 
 const parseViaGoogleRpc = async (
@@ -113,13 +214,16 @@ const parseViaGoogleRpc = async (
 	const templates = getGoogleRpcTemplates();
 
 	try {
-		const translationRequest = buildTranslationRequest(
-			templates,
-			options.text,
-			options.from,
-			options.to,
+		const translation = await translateViaGoogleRpc(
+			page,
+			{
+				text: options.text,
+				from: options.from,
+				to: options.to,
+			},
+			false,
 		);
-		const requests: BuiltRpcRequest[] = [translationRequest];
+		const requests: BuiltRpcRequest[] = [];
 		const shouldFetchSuggestions = options.from !== "auto" &&
 			Boolean(templates.templates.autocomplete && templates.ids.autocomplete);
 		if (shouldFetchSuggestions) {
@@ -133,22 +237,13 @@ const parseViaGoogleRpc = async (
 			);
 		}
 
-		const translationResponses = await executeGoogleRpc(page, requests);
-		const translationPayload = extractRpcPayload(
-			translationResponses.translate.body,
-			templates.ids.translate,
-		);
-		const translation = parseTranslationPayload(
-			translationPayload,
-			options.text,
-			options.from,
-		);
+		const translationResponses = shouldFetchSuggestions
+			? await executeGoogleRpc(page, requests)
+			: undefined;
 		const suggestions = shouldFetchSuggestions && templates.ids.autocomplete
-			? parseAutocompletePayload(
-				extractRpcPayload(
-					translationResponses.autocomplete.body,
-					templates.ids.autocomplete,
-				),
+			? tryParseAutocompletePayload(
+				translationResponses?.autocomplete?.body,
+				templates.ids.autocomplete,
 			)
 			: undefined;
 
@@ -156,14 +251,12 @@ const parseViaGoogleRpc = async (
 			throw new Error("missing translated text from Google RPC response");
 		}
 
-		const sourceCardsRequest = options.audio
-			? buildSourceCardsRequest(
-				templates,
-				options.text,
-				translation.resolvedFrom,
-				options.to,
-			)
-			: undefined;
+		const sourceCardsRequest = buildSourceCardsRequest(
+			templates,
+			options.text,
+			translation.resolvedFrom,
+			options.to,
+		);
 		const targetCardsRequest = buildTargetCardsRequest(
 			templates,
 			translation.result,
@@ -174,11 +267,9 @@ const parseViaGoogleRpc = async (
 			...(sourceCardsRequest ? [sourceCardsRequest] : []),
 			targetCardsRequest,
 		]);
-		const sourceCards = sourceCardsRequest
-			? parseCardsPayload(
-				extractRpcPayload(cardResponses.sourceCards.body, templates.ids.cards),
-			)
-			: undefined;
+		const sourceCards = parseCardsPayload(
+			extractRpcPayload(cardResponses.sourceCards.body, templates.ids.cards),
+		);
 		const targetCards = parseCardsPayload(
 			extractRpcPayload(cardResponses.targetCards.body, templates.ids.cards),
 		);
@@ -191,46 +282,34 @@ const parseViaGoogleRpc = async (
 				options.text,
 				translation.result,
 				sourceCards?.headword,
+				targetCards.headword,
 				translation.resolvedFrom,
 				options.to,
 			);
 		}
 
-		const hasAudio = Boolean(
-			audioData &&
-				(audioData.source || audioData.translation || audioData.dictionary),
-		);
+		const fromSide = compactObject<ISide>({
+			...(translation.detectedLanguage && {
+				detectedLanguage: translation.detectedLanguage,
+			}),
+			...(translation.didYouMean && { didYouMean: translation.didYouMean }),
+			...(suggestions && { suggestions }),
+			...(translation.sourcePronunciation && {
+				pronunciation: translation.sourcePronunciation,
+			}),
+			...(audioData?.from && { audio: audioData.from }),
+			dictionary: toDictionaryPayload(sourceCards, audioData?.fromDictionary),
+		});
+		const toSide = compactObject<ISide>({
+			...(audioData?.to && { audio: audioData.to }),
+			dictionary: toDictionaryPayload(targetCards, audioData?.toDictionary),
+		});
 
-		return {
+		return compactObject({
 			result: translation.result,
-			...((translation.detectedLanguage ||
-				translation.didYouMean ||
-				suggestions ||
-				translation.sourcePronunciation) && {
-				from: {
-					...(translation.detectedLanguage && {
-						detectedLanguage: translation.detectedLanguage,
-					}),
-					...(translation.didYouMean && { didYouMean: translation.didYouMean }),
-					...(suggestions && { suggestions }),
-					...(translation.sourcePronunciation && {
-						pronunciation: translation.sourcePronunciation,
-					}),
-				},
-			}),
-			...(targetCards.pronunciation &&
-				{ pronunciation: targetCards.pronunciation }),
-			...(hasAudio && { audio: audioData }),
-			...(targetCards.examples && {
-				examples: targetCards.examples,
-			}),
-			...(targetCards.definitions && {
-				definitions: targetCards.definitions,
-			}),
-			...(targetCards.translations && {
-				translations: targetCards.translations,
-			}),
-		};
+			...(hasEntries(fromSide) && { from: fromSide }),
+			...(hasEntries(toSide) && { to: toSide }),
+		});
 	} catch (error) {
 		if (!allowReinitialize) {
 			throw error;
@@ -244,6 +323,154 @@ const parseViaGoogleRpc = async (
 		});
 		return await parseViaGoogleRpc(page, options, false);
 	}
+};
+
+const parseLongTextViaGoogleRpc = async (
+	page: Page,
+	options: {
+		text: string;
+		from: string;
+		to: string;
+		audio: boolean;
+	},
+) => {
+	const chunks = splitLongText(options.text);
+	const results: { result: string; from?: ISide }[] = [];
+
+	for (const chunk of chunks) {
+		const translation = await translateViaGoogleRpc(page, {
+			text: chunk.text,
+			from: options.from,
+			to: options.to,
+		}, true);
+		if (!translation?.result) {
+			throw new Error("missing translated text for chunked translation");
+		}
+
+		results.push({
+			result: translation.result,
+			...((translation.detectedLanguage)
+				? {
+					from: {
+						detectedLanguage: translation.detectedLanguage,
+					},
+				}
+				: {}),
+		});
+	}
+
+	const combinedResult = results.map((result, index) =>
+		result.result + (chunks[index]?.separator ?? "")
+	).join("");
+	const detectedLanguages = Array.from(
+		new Set(
+			results
+				.map((result) => result.from?.detectedLanguage)
+				.filter((language): language is string => Boolean(language)),
+		),
+	);
+	const fromSide = compactObject<ISide>({
+		...(detectedLanguages.length === 1 && {
+			detectedLanguage: detectedLanguages[0],
+		}),
+	});
+
+	return compactObject({
+		result: combinedResult,
+		...(hasEntries(fromSide) && { from: fromSide }),
+	});
+};
+
+const tryParseAutocompletePayload = (
+	body: string | undefined,
+	rpcId: string,
+) => {
+	if (!body) {
+		return undefined;
+	}
+
+	try {
+		return parseAutocompletePayload(extractRpcPayload(body, rpcId));
+	} catch {
+		return undefined;
+	}
+};
+
+const splitLongText = (text: string) => {
+	if (text.length <= SAFE_RPC_CHUNK_LIMIT) {
+		return [{ text, separator: "" }];
+	}
+
+	const chunks: { text: string; separator: string }[] = [];
+	let start = 0;
+
+	while (start < text.length) {
+		let end = Math.min(start + SAFE_RPC_CHUNK_LIMIT, text.length);
+		if (end >= text.length) {
+			chunks.push({
+				text: text.slice(start),
+				separator: "",
+			});
+			break;
+		}
+
+		const split = findChunkBoundary(text, start, end);
+		const separatorEnd = advanceSeparator(text, split);
+		const chunkText = text.slice(start, split);
+		const separator = text.slice(split, separatorEnd);
+
+		chunks.push({
+			text: chunkText,
+			separator,
+		});
+		start = separatorEnd;
+	}
+
+	return chunks.filter((chunk) => chunk.text.length > 0);
+};
+
+const findChunkBoundary = (text: string, start: number, end: number) => {
+	const min = Math.max(
+		start + Math.floor(SAFE_RPC_CHUNK_LIMIT * CHUNK_SPLIT_MIN_RATIO),
+		start + 1,
+	);
+	const paragraphBreak = text.lastIndexOf("\n\n", end - 1);
+	if (paragraphBreak >= min) {
+		return paragraphBreak;
+	}
+
+	const lineBreak = text.lastIndexOf("\n", end - 1);
+	if (lineBreak >= min) {
+		return lineBreak;
+	}
+
+	for (let index = end - 1; index >= min; index--) {
+		if (!/\s/.test(text[index])) {
+			continue;
+		}
+
+		const previous = text[index - 1];
+		if (previous && /[.!?;:。！？]/.test(previous)) {
+			return index;
+		}
+	}
+
+	for (let index = end - 1; index >= min; index--) {
+		if (/\s/.test(text[index])) {
+			return index;
+		}
+	}
+
+	return end;
+};
+
+const advanceSeparator = (text: string, index: number) => {
+	let next = index;
+	while (next < text.length && /\s/.test(text[next])) {
+		next += 1;
+	}
+
+	return next;
 };
 
 const buildTranslationRequest = (
@@ -354,48 +581,93 @@ const fetchAudioData = async (
 	sourceText: string,
 	translatedText: string,
 	sourceDictionaryHeadword: string | undefined,
+	targetDictionaryHeadword: string | undefined,
 	sourceLang: string,
 	targetLang: string,
 ) => {
 	const requests: BuiltRpcRequest[] = [
 		{
 			...buildAudioRequest(templates, sourceText, sourceLang),
-			responseKey: "sourceAudio",
+			responseKey: "fromAudio",
 		},
 		{
 			...buildAudioRequest(templates, translatedText, targetLang),
-			responseKey: "translationAudio",
+			responseKey: "toAudio",
 		},
 	];
 
 	const normalizedSourceText = sourceText.trim();
-	const normalizedHeadword = sourceDictionaryHeadword?.trim();
-	const needsDictionaryAudio = normalizedHeadword &&
-		normalizedHeadword !== normalizedSourceText;
-	if (needsDictionaryAudio) {
+	const normalizedTranslatedText = translatedText.trim();
+	const normalizedSourceHeadword = sourceDictionaryHeadword?.trim();
+	const normalizedTargetHeadword = targetDictionaryHeadword?.trim();
+	const needsSourceDictionaryAudio = normalizedSourceHeadword &&
+		normalizedSourceHeadword !== normalizedSourceText;
+	const needsTargetDictionaryAudio = normalizedTargetHeadword &&
+		normalizedTargetHeadword !== normalizedTranslatedText;
+	if (needsSourceDictionaryAudio) {
 		requests.push({
-			...buildAudioRequest(templates, normalizedHeadword, sourceLang),
-			responseKey: "dictionaryAudio",
+			...buildAudioRequest(templates, normalizedSourceHeadword, sourceLang),
+			responseKey: "fromDictionaryAudio",
+		});
+	}
+	if (needsTargetDictionaryAudio) {
+		requests.push({
+			...buildAudioRequest(templates, normalizedTargetHeadword, targetLang),
+			responseKey: "toDictionaryAudio",
 		});
 	}
 
 	const responses = await executeGoogleRpc(page, requests);
-	const sourceAudio = extractAudioBase64FromBody(responses.sourceAudio.body);
-	const translationAudio = extractAudioBase64FromBody(
-		responses.translationAudio.body,
-	);
-	const dictionaryAudio = normalizedHeadword
-		? needsDictionaryAudio
-			? extractAudioBase64FromBody(responses.dictionaryAudio.body)
-			: sourceAudio
+	const fromAudio = extractAudioBase64FromBody(responses.fromAudio.body);
+	const toAudio = extractAudioBase64FromBody(responses.toAudio.body);
+	const fromDictionaryAudio = normalizedSourceHeadword
+		? needsSourceDictionaryAudio
+			? extractAudioBase64FromBody(responses.fromDictionaryAudio.body)
+			: fromAudio
+		: undefined;
+	const toDictionaryAudio = normalizedTargetHeadword
+		? needsTargetDictionaryAudio
+			? extractAudioBase64FromBody(responses.toDictionaryAudio.body)
+			: toAudio
 		: undefined;
 
 	return {
-		...(sourceAudio && { source: toAudioDataUrl(sourceAudio) }),
-		...(translationAudio && { translation: toAudioDataUrl(translationAudio) }),
-		...(dictionaryAudio && { dictionary: toAudioDataUrl(dictionaryAudio) }),
+		...(fromAudio && { from: toAudioDataUrl(fromAudio) }),
+		...(fromDictionaryAudio && {
+			fromDictionary: toAudioDataUrl(fromDictionaryAudio),
+		}),
+		...(toAudio && { to: toAudioDataUrl(toAudio) }),
+		...(toDictionaryAudio &&
+			{ toDictionary: toAudioDataUrl(toDictionaryAudio) }),
 	} satisfies IAudio;
 };
+
+const toDictionaryPayload = (
+	cards: CardResult | undefined,
+	audio: string | undefined,
+): IDictionary | undefined =>
+	compactObject<IDictionary>({
+		...(cards?.headword && { headword: cards.headword }),
+		...(cards?.pronunciation && { pronunciation: cards.pronunciation }),
+		...(audio && { audio }),
+		...(cards?.examples && { examples: cards.examples }),
+		...(cards?.definitions && { definitions: cards.definitions }),
+		...(cards?.synonyms && { synonyms: cards.synonyms }),
+		...(cards?.related && { related: cards.related }),
+		...(cards?.translations && { translations: cards.translations }),
+	});
+
+const compactObject = <T extends Record<string, unknown>>(
+	value: T,
+): T | undefined => {
+	const entries = Object.entries(value).filter(([, item]) =>
+		item !== undefined
+	);
+	return entries.length > 0 ? Object.fromEntries(entries) as T : undefined;
+};
+
+const hasEntries = (value: Record<string, unknown> | undefined) =>
+	Boolean(value && Object.keys(value).length > 0);
 
 const parseTranslationPayload = (
 	payload: unknown,
@@ -475,6 +747,8 @@ const parseCardsPayload = (payload: unknown): CardResult => {
 	const headword = cleanText(asString(root[0]));
 	const definitions = parseDefinitions(root[1]);
 	const examples = parseExamples(root[2]);
+	const related = parseRelated(root[3]);
+	const synonyms = parseTopLevelSynonyms(root[4]);
 	const translations = parseTranslations(root[5]);
 	const pronunciation = cleanText(asString(root[6]));
 
@@ -483,6 +757,8 @@ const parseCardsPayload = (payload: unknown): CardResult => {
 		...(pronunciation && { pronunciation }),
 		...(examples && { examples }),
 		...(definitions && { definitions }),
+		...(synonyms && { synonyms }),
+		...(related && { related }),
 		...(translations && { translations }),
 	};
 };
@@ -573,6 +849,52 @@ const parseExamples = (section: unknown): IExamples | undefined => {
 		.filter((example): example is string => Boolean(example));
 
 	return examples.length > 0 ? examples : undefined;
+};
+
+const parseRelated = (section: unknown): IRelated | undefined => {
+	if (!Array.isArray(section)) {
+		return undefined;
+	}
+
+	const related = Array.from(new Set(extractNestedStrings(section[0])));
+	return related.length > 0 ? related : undefined;
+};
+
+const parseTopLevelSynonyms = (section: unknown): ISynonyms | undefined => {
+	if (!Array.isArray(section) || !Array.isArray(section[0])) {
+		return undefined;
+	}
+
+	const synonyms: ISynonyms = {};
+	for (const group of section[0]) {
+		if (!Array.isArray(group) || !Array.isArray(group[1])) {
+			continue;
+		}
+
+		const partOfSpeech = getPartOfSpeechLabel(group[3]);
+		const labels = extractNestedStrings(group[2]);
+		const entries = group[1]
+			.map((entry) => {
+				const words = Array.from(new Set(extractNestedStrings(entry)));
+				if (words.length === 0) {
+					return undefined;
+				}
+
+				return {
+					...(labels.length > 0 && { labels }),
+					words,
+				};
+			})
+			.filter((entry) => entry !== undefined);
+
+		if (entries.length === 0) {
+			continue;
+		}
+
+		synonyms[partOfSpeech] = entries;
+	}
+
+	return Object.keys(synonyms).length > 0 ? synonyms : undefined;
 };
 
 const parseTranslations = (section: unknown): ITranslations | undefined => {

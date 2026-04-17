@@ -13,7 +13,7 @@ curl 'https://t.song.work/api?text=hello&from=en&to=zh-CN'
 ```
 
 To include pronunciation audio as data URLs for the source text, translated
-text, and dictionary headword when available:
+text, and dictionary headwords when available:
 
 ```bash
 curl 'https://t.song.work/api?text=chien&from=fr&to=en&audio=true'
@@ -73,18 +73,62 @@ See the markdown table below:
 | -------- | ----------------- | ------- |
 | `PORT`   | Port to listen on | `8999`  |
 
-## Audio Response
+## Response Shape
 
-When `audio=true`, the API may return an `audio` object with:
+The API returns a nested response shaped around the source side (`from`) and
+target side (`to`):
 
-- `source`: a `data:audio/mpeg;base64,...` URL for the source speaker button
-- `translation`: a `data:audio/mpeg;base64,...` URL for the translated speaker
-  button
-- `dictionary`: a `data:audio/mpeg;base64,...` URL for the dictionary headword
-  speaker button when Google exposes one
+```json
+{
+  "result": "dog",
+  "from": {
+    "pronunciation": "ʃjɛ̃",
+    "audio": "data:audio/mpeg;base64,...",
+    "dictionary": {
+      "headword": "chien",
+      "pronunciation": "ʃjɛ̃",
+      "audio": "data:audio/mpeg;base64,...",
+      "examples": ["..."],
+      "definitions": {
+        "noun": [{ "definition": "...", "example": "..." }]
+      },
+      "synonyms": {
+        "noun": [{ "labels": ["common"], "words": ["..."] }]
+      },
+      "related": ["..."],
+      "translations": {
+        "noun": [
+          {
+            "translation": "dog",
+            "reversedTranslations": ["chien"],
+            "frequency": "common"
+          }
+        ]
+      }
+    }
+  },
+  "to": {
+    "audio": "data:audio/mpeg;base64,...",
+    "dictionary": {
+      "headword": "dog",
+      "pronunciation": "dɔɡ"
+    }
+  }
+}
+```
 
-Audio fields are omitted when Google does not expose a matching speaker button
-or audio payload for the current text.
+Notes:
+
+- `result` is always present.
+- `from.didYouMean`, `from.suggestions`, and `from.detectedLanguage` only
+  appear when Google returns them.
+- `from.audio`, `to.audio`, `from.dictionary.audio`, and
+  `to.dictionary.audio` only appear when `audio=true` and Google exposes a
+  matching speaker payload.
+- For long text, Translateer chunks the request to avoid Google-side
+  pagination. In that mode, the API returns the stitched `result` and a stable
+  `from.detectedLanguage` when all chunks agree, but does not merge audio or
+  dictionary metadata across chunks.
 
 ## Raycast Extension
 

@@ -76,8 +76,9 @@
 						<td>audio</td>
 						<td>boolean</td>
 						<td>
-							If true, include pronunciation audio as data URLs for the source
-							text, translation, and dictionary headword when available.
+							If true, include audio data URLs under <code>from.audio</code>,
+							<code>to.audio</code>, and the nested dictionary objects when
+							available.
 						</td>
 						<td><code>false</code></td>
 					</tr>
@@ -105,6 +106,13 @@
 				Paths use dot notation. Optional fields only appear when Google returns
 				them for the current request.
 			</p>
+			<blockquote>
+				Long text is translated in smaller chunks to avoid Google-side
+				pagination. In that mode, the API returns the stitched
+				<code>result</code> and, when stable across chunks,
+				<code>from.detectedLanguage</code>, but does not merge audio or
+				dictionary metadata across the full text.
+			</blockquote>
 			<table>
 				<thead>
 					<tr>
@@ -148,42 +156,66 @@
 						<td>Pronunciation of the source text.</td>
 					</tr>
 					<tr>
-						<td><code>pronunciation</code></td>
+						<td><code>from.audio</code></td>
 						<td>string?</td>
-						<td>Pronunciation of the translated text or headword.</td>
+						<td>Source speaker audio when <code>audio=true</code>.</td>
 					</tr>
 					<tr>
-						<td><code>audio</code></td>
+						<td><code>from.dictionary</code></td>
 						<td>object?</td>
-						<td>Audio data URLs when <code>audio=true</code>.</td>
+						<td>Source-side dictionary details when Google exposes them.</td>
 					</tr>
 					<tr>
-						<td><code>audio.source</code></td>
+						<td><code>from.dictionary.headword</code></td>
 						<td>string?</td>
-						<td>Source speaker audio.</td>
+						<td>Dictionary headword for the source text.</td>
 					</tr>
 					<tr>
-						<td><code>audio.translation</code></td>
+						<td><code>from.dictionary.pronunciation</code></td>
 						<td>string?</td>
-						<td>Translated speaker audio.</td>
+						<td>Pronunciation of the source dictionary headword.</td>
 					</tr>
 					<tr>
-						<td><code>audio.dictionary</code></td>
+						<td><code>from.dictionary.audio</code></td>
 						<td>string?</td>
-						<td>Dictionary headword audio when Google exposes it.</td>
+						<td>
+							Source dictionary audio when <code>audio=true</code>.
+						</td>
 					</tr>
 					<tr>
-						<td><code>examples[]</code></td>
+						<td><code>from.dictionary.examples[]</code></td>
 						<td>string[]?</td>
-						<td>Example usages for the translated headword.</td>
+						<td>Example usages for the source dictionary headword.</td>
 					</tr>
 					<tr>
-						<td><code>definitions</code></td>
+						<td><code>from.dictionary.definitions</code></td>
 						<td>object?</td>
 						<td>Definitions grouped by part of speech.</td>
 					</tr>
 					<tr>
-						<td><code>definitions.&lt;partOfSpeech&gt;[]</code></td>
+						<td><code>from.dictionary.synonyms</code></td>
+						<td>object?</td>
+						<td>Standalone synonym groups grouped by part of speech.</td>
+					</tr>
+					<tr>
+						<td>
+							<code>from.dictionary.synonyms.&lt;partOfSpeech&gt;[]</code>
+						</td>
+						<td>object[]</td>
+						<td>
+							Groups with optional <code>labels[]</code> and
+							<code>words[]</code>.
+						</td>
+					</tr>
+					<tr>
+						<td><code>from.dictionary.related[]</code></td>
+						<td>string[]?</td>
+						<td>Related words from Google’s <code>See also</code> section.</td>
+					</tr>
+					<tr>
+						<td>
+							<code>from.dictionary.definitions.&lt;partOfSpeech&gt;[]</code>
+						</td>
 						<td>object[]</td>
 						<td>
 							Entries with <code>definition</code> and optional
@@ -192,12 +224,99 @@
 						</td>
 					</tr>
 					<tr>
-						<td><code>translations</code></td>
+						<td><code>from.dictionary.translations</code></td>
 						<td>object?</td>
-						<td>Reverse translations grouped by part of speech.</td>
+						<td>Dictionary translations grouped by part of speech.</td>
 					</tr>
 					<tr>
-						<td><code>translations.&lt;partOfSpeech&gt;[]</code></td>
+						<td>
+							<code>from.dictionary.translations.&lt;partOfSpeech&gt;[]</code>
+						</td>
+						<td>object[]</td>
+						<td>
+							Entries with <code>translation</code>,
+							<code>reversedTranslations</code>, and
+							<code>frequency</code>.
+						</td>
+					</tr>
+					<tr>
+						<td><code>to</code></td>
+						<td>object?</td>
+						<td>Target-side metadata.</td>
+					</tr>
+					<tr>
+						<td><code>to.audio</code></td>
+						<td>string?</td>
+						<td>Translated speaker audio when <code>audio=true</code>.</td>
+					</tr>
+					<tr>
+						<td><code>to.dictionary</code></td>
+						<td>object?</td>
+						<td>Target-side dictionary details when Google exposes them.</td>
+					</tr>
+					<tr>
+						<td><code>to.dictionary.headword</code></td>
+						<td>string?</td>
+						<td>Dictionary headword for the translated text.</td>
+					</tr>
+					<tr>
+						<td><code>to.dictionary.pronunciation</code></td>
+						<td>string?</td>
+						<td>Pronunciation of the target dictionary headword.</td>
+					</tr>
+					<tr>
+						<td><code>to.dictionary.audio</code></td>
+						<td>string?</td>
+						<td>Target dictionary audio when <code>audio=true</code>.</td>
+					</tr>
+					<tr>
+						<td><code>to.dictionary.examples[]</code></td>
+						<td>string[]?</td>
+						<td>Example usages for the translated headword.</td>
+					</tr>
+					<tr>
+						<td><code>to.dictionary.definitions</code></td>
+						<td>object?</td>
+						<td>Definitions grouped by part of speech.</td>
+					</tr>
+					<tr>
+						<td><code>to.dictionary.synonyms</code></td>
+						<td>object?</td>
+						<td>Standalone synonym groups grouped by part of speech.</td>
+					</tr>
+					<tr>
+						<td><code>to.dictionary.synonyms.&lt;partOfSpeech&gt;[]</code></td>
+						<td>object[]</td>
+						<td>
+							Groups with optional <code>labels[]</code> and
+							<code>words[]</code>.
+						</td>
+					</tr>
+					<tr>
+						<td><code>to.dictionary.related[]</code></td>
+						<td>string[]?</td>
+						<td>Related words from Google’s <code>See also</code> section.</td>
+					</tr>
+					<tr>
+						<td>
+							<code>to.dictionary.definitions.&lt;partOfSpeech&gt;[]</code>
+						</td>
+						<td>object[]</td>
+						<td>
+							Entries with <code>definition</code> and optional
+							<code>example</code>, <code>labels</code>, and
+							<code>synonyms</code>.
+						</td>
+					</tr>
+					<tr>
+						<td><code>to.dictionary.translations</code></td>
+						<td>object?</td>
+						<td>Dictionary translations grouped by part of speech.</td>
+					</tr>
+					<tr>
+						<td>
+							<code>to.dictionary.translations.&lt;partOfSpeech&gt;[]</code>
+						</td>
 						<td>object[]</td>
 						<td>
 							Entries with <code>translation</code>,
