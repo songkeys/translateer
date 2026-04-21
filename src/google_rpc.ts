@@ -66,6 +66,7 @@ const AUTOCOMPLETE_SAMPLE_REQUEST = {
 	from: "en",
 	to: "fr",
 };
+const RUNTIME_WARMUP_TEXT = "hello";
 const TEXTAREA_SELECTOR = "textarea[aria-label='Source text']";
 const SOURCE_AUDIO_SELECTOR = 'button[aria-label="Listen to source text"]';
 const ALLOWED_FORWARD_HEADERS = new Set([
@@ -148,33 +149,133 @@ export const executeGoogleRpc = async (
 		>;
 	}
 
+	await warmGoogleRpcRuntime(page);
+
 	return await page.evaluate((requests) => {
-		const _ = (window as unknown as Window & {
-			default_TranslateWebserverUi: Record<string, unknown>;
-			WIZ_global_data: Record<string, unknown>;
-		}).default_TranslateWebserverUi;
 		const win = window as unknown as Window & {
 			WIZ_global_data: Record<string, unknown>;
-		};
-
-		const createRunner = () => {
-			const hm = Object.create(
-				(_ as { HM: { prototype: object } }).HM.prototype,
-			) as {
-				j: unknown;
-				v: boolean;
-				config: { rL: string };
-				UA(): { run(body: string): Promise<string> };
+			ridgeslice?: {
+				gc?: new (seed: string) => {
+					ply(
+						resolve: (value: string | undefined) => void,
+						flag: boolean,
+						payload: Record<string, string>,
+					): void;
+				};
 			};
-
-			hm.j = null;
-			hm.v = false;
-			hm.config = { rL: "mgGpzd" };
-			return hm.UA();
+			default_TranslateWebserverUi?: Record<string, unknown>;
+			__translateerGoogleRpcRuntime?: {
+				bgrPayloadKey: string;
+				seed: string;
+				mode?: string;
+			};
 		};
 
 		let nextReqId = Math.floor(Date.now() % 1_000_000) +
 			Math.floor(Math.random() * 10_000);
+
+		const discoverGoogleRpcRuntime = () => {
+			if (win.__translateerGoogleRpcRuntime?.seed &&
+				win.__translateerGoogleRpcRuntime?.bgrPayloadKey) {
+				return win.__translateerGoogleRpcRuntime;
+			}
+
+			if (!win.ridgeslice?.gc) {
+				throw new Error("Google ridgeslice runtime is not ready");
+			}
+
+			const rawRuntimeState = String(win.WIZ_global_data?.mnsUbf ?? "");
+			if (!rawRuntimeState) {
+				throw new Error("missing Google runtime state");
+			}
+
+			let parsedRuntimeState: unknown;
+			try {
+				parsedRuntimeState = JSON.parse(
+					rawRuntimeState.replace(/^%\.\@\./, "["),
+				);
+			} catch (error) {
+				throw new Error(
+					`failed to parse Google runtime state: ${String(error)}`,
+				);
+			}
+
+			if (!Array.isArray(parsedRuntimeState)) {
+				throw new Error("unexpected Google runtime state payload");
+			}
+
+			const seed = typeof parsedRuntimeState[0] === "string"
+				? parsedRuntimeState[0]
+				: undefined;
+			const mode = [...parsedRuntimeState]
+				.reverse()
+				.find((value): value is string =>
+					typeof value === "string" && value !== seed
+				);
+			if (!seed) {
+				throw new Error("missing Google batch execute seed");
+			}
+
+			let bgrPayloadKey = "";
+			for (
+				const value of Object.values(
+					win.default_TranslateWebserverUi ?? {},
+				)
+			) {
+				if (typeof value !== "function") {
+					continue;
+				}
+
+				const source = Function.prototype.toString.call(value);
+				const match = source.match(/wL\s*:\s*"([^"]+)"/);
+				if (match?.[1]) {
+					bgrPayloadKey = match[1];
+					break;
+				}
+			}
+
+			if (!bgrPayloadKey) {
+				// Keep the known key as a last-resort default if source scanning fails.
+				bgrPayloadKey = "mgGpzd";
+			}
+
+			const runtime = {
+				bgrPayloadKey,
+				seed,
+				...(mode && { mode }),
+			};
+			win.__translateerGoogleRpcRuntime = runtime;
+			return runtime;
+		};
+
+		const buildBatchExecuteBgr = async (fReq: string) => {
+			const runtime = discoverGoogleRpcRuntime();
+			const startedAt = Date.now();
+			const gc = win.ridgeslice?.gc;
+			if (!gc) {
+				throw new Error("Google ridgeslice runtime is not ready");
+			}
+			const generator = new gc(runtime.seed);
+			const token = await new Promise<string | undefined>((resolve) => {
+				generator.ply(
+					resolve,
+					true,
+					{ [runtime.bgrPayloadKey]: fReq },
+				);
+			});
+			if (!token) {
+				throw new Error("failed to compute Google batch execute token");
+			}
+
+			const resultPayload: unknown[] = [];
+			resultPayload[0] = token;
+			resultPayload[3] = Math.max(0, Date.now() - startedAt);
+			resultPayload[7] = 0;
+			if (runtime.mode) {
+				resultPayload[8] = runtime.mode;
+			}
+			return JSON.stringify(resultPayload);
+		};
 
 		const sendRequest = async (request: BuiltRpcRequest) => {
 			const url = new URL(request.url);
@@ -189,20 +290,13 @@ export const executeGoogleRpc = async (
 				headers[key] = value;
 			}
 
-			try {
-				headers["X-Goog-BatchExecute-Bgr"] = await createRunner().run(
-					request.fReq,
-				);
-			} catch {
-				headers["X-Goog-BatchExecute-Bgr"] = await createRunner().run(
-					request.fReq,
-				);
-			}
-
 			if (!headers["Content-Type"] && !headers["content-type"]) {
 				headers["Content-Type"] =
 					"application/x-www-form-urlencoded;charset=UTF-8";
 			}
+			headers["X-Goog-BatchExecute-Bgr"] = await buildBatchExecuteBgr(
+				request.fReq,
+			);
 
 			const response = await fetch(url.toString(), {
 				method: "POST",
@@ -225,6 +319,40 @@ export const executeGoogleRpc = async (
 			]),
 		).then((entries) => Object.fromEntries(entries));
 	}, requests);
+};
+
+export const warmGoogleRpcRuntime = async (page: Page) => {
+	const isReady = await page.evaluate(() => {
+		const win = window as unknown as Window & {
+			WIZ_global_data?: Record<string, unknown>;
+			ridgeslice?: {
+				gc?: unknown;
+			};
+		};
+		return Boolean(
+			win.ridgeslice?.gc &&
+				typeof win.WIZ_global_data?.mnsUbf === "string",
+		);
+	}).catch(() => false);
+	if (isReady) {
+		return;
+	}
+
+	await page.waitForSelector(TEXTAREA_SELECTOR, { timeout: 10000 });
+	await setSourceText(page, RUNTIME_WARMUP_TEXT);
+	await page.waitForFunction(() => {
+		const win = window as unknown as Window & {
+			WIZ_global_data?: Record<string, unknown>;
+			ridgeslice?: {
+				gc?: unknown;
+			};
+		};
+		return Boolean(
+			win.ridgeslice?.gc &&
+				typeof win.WIZ_global_data?.mnsUbf === "string",
+		);
+	}, { timeout: 10000 });
+	await sleep(500);
 };
 
 export const getGoogleRpcTemplates = () => {
@@ -353,27 +481,6 @@ const validateTemplates = async (
 const captureTemplates = async (
 	page: Page,
 ): Promise<GoogleRpcTemplateCache> => {
-	const ids = await page.evaluate(() => {
-		const root = (window as unknown as Window & {
-			default_TranslateWebserverUi: Record<string, unknown>;
-		}).default_TranslateWebserverUi;
-		const translate = root.jOa as { getName(): string } | undefined;
-		const audio = root.nOa as { getName(): string } | undefined;
-		const autocomplete = root.cOa as { getName(): string } | undefined;
-		const cards = root.Qu as { getName(): string } | undefined;
-
-		if (!translate?.getName || !audio?.getName || !cards?.getName) {
-			throw new Error("failed to discover Google RPC ids");
-		}
-
-		return {
-			translate: translate.getName(),
-			audio: audio.getName(),
-			cards: cards.getName(),
-			autocomplete: autocomplete?.getName(),
-		};
-	});
-
 	await page.goto(
 		`https://translate.google.com/details?sl=${AUTOCOMPLETE_SAMPLE_REQUEST.from}&tl=${AUTOCOMPLETE_SAMPLE_REQUEST.to}&op=translate`,
 		{
@@ -425,37 +532,7 @@ const captureTemplates = async (
 		);
 		await handlePrivacyConsent(page);
 		await page.waitForSelector(TEXTAREA_SELECTOR, { timeout: 10000 });
-		await page.evaluate(
-			(selector, text) => {
-				const textarea = document.querySelector(selector);
-				if (!(textarea instanceof HTMLTextAreaElement)) {
-					throw new Error("source textarea not found");
-				}
-
-				textarea.focus();
-				const descriptor = Object.getOwnPropertyDescriptor(
-					HTMLTextAreaElement.prototype,
-					"value",
-				);
-				if (descriptor?.set) {
-					descriptor.set.call(textarea, text);
-				} else {
-					textarea.value = text;
-				}
-
-				textarea.dispatchEvent(
-					new InputEvent("input", {
-						bubbles: true,
-						composed: true,
-						data: text,
-						inputType: "insertText",
-					}),
-				);
-				textarea.dispatchEvent(new Event("change", { bubbles: true }));
-			},
-			TEXTAREA_SELECTOR,
-			SAMPLE_REQUEST.text,
-		);
+		await setSourceText(page, SAMPLE_REQUEST.text);
 
 		await page.waitForFunction(() => {
 			const details = document.querySelector("c-wiz[role='complementary']");
@@ -478,21 +555,28 @@ const captureTemplates = async (
 		page.off("request", onRequest);
 	}
 
-	const selectTemplate = (name: RpcTemplateName) => {
-		switch (name) {
-			case "translate":
-				return capturedRequests.find((request) =>
-					request.rpcId === ids.translate &&
-					request.postData.includes(encodeURIComponent(SAMPLE_REQUEST.text))
-				);
-			case "audio":
-				return capturedRequests.find((request) => request.rpcId === ids.audio);
-			case "targetCards":
-				return capturedRequests.find((request) =>
-					request.rpcId === ids.cards &&
-					getCardsDirection(request.postData, ids.cards) === 2
-				);
-		}
+	const autocompleteRequest = capturedRequests.find((request) =>
+		matchesAutocompleteRequest(request)
+	);
+	const translateRequest = capturedRequests.find((request) =>
+		matchesTranslateRequest(request)
+	);
+	const audioRequest = capturedRequests.find((request) =>
+		matchesAudioRequest(request)
+	);
+	const targetCardsRequest = capturedRequests.find((request) =>
+		matchesTargetCardsRequest(request)
+	);
+
+	if (!translateRequest || !audioRequest || !targetCardsRequest) {
+		throw new Error("failed to capture required Google RPC templates");
+	}
+
+	const ids = {
+		translate: translateRequest.rpcId,
+		audio: audioRequest.rpcId,
+		cards: targetCardsRequest.rpcId,
+		...(autocompleteRequest && { autocomplete: autocompleteRequest.rpcId }),
 	};
 
 	const templateNames: CoreRpcTemplateName[] = [
@@ -502,7 +586,11 @@ const captureTemplates = async (
 	];
 	const templates = Object.fromEntries(
 		templateNames.map((name) => {
-			const request = selectTemplate(name);
+			const request = name === "translate"
+				? translateRequest
+				: name === "audio"
+				? audioRequest
+				: targetCardsRequest;
 			if (!request) {
 				throw new Error(`failed to capture ${name} template`);
 			}
@@ -537,33 +625,28 @@ const captureTemplates = async (
 		autocomplete?: RpcTemplate;
 	};
 
-	if (ids.autocomplete) {
-		const autocompleteRequest = capturedRequests.find((request) =>
-			request.rpcId === ids.autocomplete
+	if (autocompleteRequest) {
+		const params = new URLSearchParams(autocompleteRequest.postData);
+		const fReqJson = JSON.parse(params.get("f.req") ?? "null");
+		const bodyParams: Record<string, string> = {};
+		params.forEach((value, key) => {
+			if (key !== "f.req") {
+				bodyParams[key] = value;
+			}
+		});
+		const headers = Object.fromEntries(
+			Object.entries(autocompleteRequest.headers).filter(([key]) =>
+				ALLOWED_FORWARD_HEADERS.has(key.toLowerCase())
+			),
 		);
-		if (autocompleteRequest) {
-			const params = new URLSearchParams(autocompleteRequest.postData);
-			const fReqJson = JSON.parse(params.get("f.req") ?? "null");
-			const bodyParams: Record<string, string> = {};
-			params.forEach((value, key) => {
-				if (key !== "f.req") {
-					bodyParams[key] = value;
-				}
-			});
-			const headers = Object.fromEntries(
-				Object.entries(autocompleteRequest.headers).filter(([key]) =>
-					ALLOWED_FORWARD_HEADERS.has(key.toLowerCase())
-				),
-			);
-			templates.autocomplete = {
-				name: "autocomplete",
-				rpcId: autocompleteRequest.rpcId,
-				url: autocompleteRequest.url,
-				headers,
-				bodyParams,
-				fReqJson,
-			};
-		}
+		templates.autocomplete = {
+			name: "autocomplete",
+			rpcId: autocompleteRequest.rpcId,
+			url: autocompleteRequest.url,
+			headers,
+			bodyParams,
+			fReqJson,
+		};
 	}
 
 	return {
@@ -573,6 +656,58 @@ const captureTemplates = async (
 		ids,
 		templates,
 	};
+};
+
+const matchesTranslateRequest = (request: CapturedRequest) => {
+	const payload = extractRequestInnerPayload(request.postData);
+	return Array.isArray(payload) &&
+		Array.isArray(payload[0]) &&
+		payload[0][0] === SAMPLE_REQUEST.text &&
+		payload[0][1] === SAMPLE_REQUEST.from &&
+		payload[0][2] === SAMPLE_REQUEST.to;
+};
+
+const matchesAudioRequest = (request: CapturedRequest) => {
+	const payload = extractRequestInnerPayload(request.postData);
+	return Array.isArray(payload) &&
+		payload[0] === SAMPLE_REQUEST.text &&
+		payload[1] === SAMPLE_REQUEST.from &&
+		payload[2] === null;
+};
+
+const matchesAutocompleteRequest = (request: CapturedRequest) => {
+	const payload = extractRequestInnerPayload(request.postData);
+	return Array.isArray(payload) &&
+		payload[0] === AUTOCOMPLETE_SAMPLE_REQUEST.text &&
+		payload[1] === AUTOCOMPLETE_SAMPLE_REQUEST.from &&
+		payload[2] === AUTOCOMPLETE_SAMPLE_REQUEST.to;
+};
+
+const matchesTargetCardsRequest = (request: CapturedRequest) => {
+	const payload = extractRequestInnerPayload(request.postData);
+	return Array.isArray(payload) &&
+		Array.isArray(payload[0]) &&
+		typeof payload[1] === "number" &&
+		payload[1] === 2 &&
+		payload[0][1] === SAMPLE_REQUEST.to &&
+		payload[0][2] === SAMPLE_REQUEST.from;
+};
+
+const extractRequestInnerPayload = (postData: string) => {
+	try {
+		const fReqJson = JSON.parse(
+			new URLSearchParams(postData).get("f.req") ?? "null",
+		);
+		const entries = extractRpcEntries(fReqJson);
+		const first = entries[0];
+		if (!first || typeof first[1] !== "string") {
+			return undefined;
+		}
+
+		return JSON.parse(first[1]);
+	} catch {
+		return undefined;
+	}
 };
 
 const handlePrivacyConsent = async (page: Page) => {
@@ -586,25 +721,56 @@ const handlePrivacyConsent = async (page: Page) => {
 	}
 };
 
-const getCardsDirection = (postData: string, rpcId: string) => {
-	const entry = extractFirstRpcEntry(
-		JSON.parse(
-			new URLSearchParams(postData).get(
-				"f.req",
-			) ?? "null",
-		),
-		rpcId,
+const setSourceText = async (page: Page, text: string) => {
+	await page.evaluate(
+		(selector, text) => {
+			const textarea = document.querySelector(selector);
+			if (!(textarea instanceof HTMLTextAreaElement)) {
+				throw new Error("source textarea not found");
+			}
+
+			textarea.focus();
+			const descriptor = Object.getOwnPropertyDescriptor(
+				HTMLTextAreaElement.prototype,
+				"value",
+			);
+			if (descriptor?.set) {
+				descriptor.set.call(textarea, text);
+			} else {
+				textarea.value = text;
+			}
+
+			textarea.dispatchEvent(
+				new InputEvent("input", {
+					bubbles: true,
+					composed: true,
+					data: text,
+					inputType: "insertText",
+				}),
+			);
+			textarea.dispatchEvent(new Event("change", { bubbles: true }));
+		},
+		TEXTAREA_SELECTOR,
+		text,
 	);
-	const innerPayload = JSON.parse(entry[1]);
-	return Array.isArray(innerPayload) ? innerPayload[1] : undefined;
+};
+
+const extractRpcEntries = (fReqJson: unknown) => {
+	if (!Array.isArray(fReqJson) || !Array.isArray(fReqJson[0])) {
+		throw new Error("unexpected f.req envelope");
+	}
+
+	return fReqJson[0].filter((
+		item,
+	): item is [string, string, unknown?, unknown?] =>
+		Array.isArray(item) &&
+		typeof item[0] === "string" &&
+		typeof item[1] === "string"
+	);
 };
 
 const extractFirstRpcEntry = (fReqJson: unknown, rpcId: string) => {
-	if (!Array.isArray(fReqJson) || !Array.isArray(fReqJson[0])) {
-		throw new Error(`unexpected f.req envelope for ${rpcId}`);
-	}
-
-	const entry = fReqJson[0].find((item: unknown) =>
+	const entry = extractRpcEntries(fReqJson).find((item: unknown) =>
 		Array.isArray(item) && item[0] === rpcId
 	);
 	if (

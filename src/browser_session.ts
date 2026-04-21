@@ -1,4 +1,5 @@
 import { connect } from "puppeteer-real-browser";
+import { warmGoogleRpcRuntime } from "./google_rpc.ts";
 
 export type Browser = Awaited<ReturnType<typeof connect>>["browser"];
 export type Page = Awaited<ReturnType<Browser["pages"]>>[number];
@@ -233,6 +234,7 @@ export default class BrowserSession {
 		console.log(`page ${index} loaded`);
 
 		await this._handlePrivacyConsent(page, index);
+		await warmGoogleRpcRuntime(page);
 	}
 
 	private async _handlePrivacyConsent(page: Page, index: number) {
